@@ -1,0 +1,123 @@
+---
+title: "Code for Metabolites Dataset"
+author: "Jingyu Liang"
+date: "2025-01-23"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+```
+
+# data
+```{r}
+metabolites <- read_excel("for_code_UNTX-07-23PHML+ DATA TABLES.xlsx", sheet = "Log Transformed Data")
+
+metabolites <- as.data.frame(metabolites)
+
+# change to numeric
+metabolites[,-1] <- apply(metabolites[,-1], 2, as.numeric) 
+```
+
+
+# Normality Check
+## Histograms
+```{r}
+# randomly select 10 columns to make histogram
+set.seed(123)
+sample_columns <- sample(names(metabolites), 10)
+
+# get the 10 columns from the metabolites to form a sample dataset
+sample <- metabolites %>% select(all_of(sample_columns))
+
+# draw the histograms
+par(mfrow=c(2,5))
+for (col in names(sample)){
+  sample_data <- sample[[col]]
+  hist(sample_data, main=paste(col), xlab = "values", col="lightblue", border="black")
+  # result <- shapiro.test(sample_data)
+}
+
+```
+
+
+## Shapiro-Wilk Test
+```{r}
+# Identify columns with variation
+valid_columns <- apply(metabolites[, -1], 2, function(x) length(unique(x)) > 1)
+
+# Run Shapiro-Wilk test only on columns with variation
+shapiro_results <- apply(metabolites[, -1][, valid_columns], 2, function(x) shapiro.test(x)$p.value)
+
+# Display normal columns (p > 0.05)
+normal_columns <- names(shapiro_results[shapiro_results > 0.05])
+print(normal_columns)
+
+# Display not normal columns (p < 0.05)
+not_normal_columns <- names(shapiro_results[shapiro_results < 0.05])
+print(not_normal_columns)
+```
+
+## Box Plot
+```{r}
+# organize the data
+# pivot_longer
+sample_long <- sample %>% pivot_longer(cols = everything(),names_to = "CHEM_ID", values_to = "Values") %>% arrange(CHEM_ID)
+
+# add shapiro_results to the long data
+# change shapiro_result to data frame
+shapiro_results <- as.data.frame(shapiro_results)
+
+# add a CHEM_ID column
+shapiro_results$CHEM_ID <- rownames(shapiro_results)
+
+# filter the rows for the sample
+sample_result <- shapiro_results %>% filter(CHEM_ID %in% sample_columns)
+
+# add the p-values to the sample_long data
+sample_long <- sample_long %>% 
+  left_join(sample_result, by="CHEM_ID")
+
+# add the stars to represent significance of Shapiro-Wilk test
+sample_long <- sample_long %>% mutate(
+    significance = case_when(
+      shapiro_results < 0.001 ~ "***",
+      shapiro_results < 0.01 ~ "**",
+      shapiro_results < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  )
+
+# box plot
+ggplot(sample_long, aes(x = CHEM_ID, y = Values)) +
+  geom_boxplot(na.rm = TRUE, fill = "yellow", color = "black") +
+  geom_text(
+    data = sample_long,
+    aes(x = CHEM_ID, y = max(sample_long$Values, na.rm = TRUE) + 0.01, label = significance), 
+    color = "black", size = 5, vjust = 0) +
+  theme_minimal() 
+
+```
+
+# summary statistics
+```{r}
+summary_table <- apply(metabolites[-1], 2, function(x) {
+  c(
+    Mean = mean(x, na.rm = TRUE),
+    Median = median(x, na.rm = TRUE),
+    Q1 = quantile(x, 0.25, na.rm = TRUE),
+    Q3 = quantile(x, 0.75, na.rm = TRUE),
+    Min = min(x, na.rm = TRUE),
+    Max = max(x, na.rm = TRUE)
+  )
+})
+
+# Convert to a data frame for better readability
+summary_table <- as.data.frame(t(summary_table))
+summary_table <- round(summary_table, 2)
+print(summary_table)
+```
+
