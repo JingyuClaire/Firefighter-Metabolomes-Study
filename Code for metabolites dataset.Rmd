@@ -10,31 +10,147 @@ knitr::opts_chunk$set(echo = TRUE)
 library(readxl)
 library(tidyverse)
 library(ggplot2)
+library(magrittr)
+library(writexl)
+library(reshape2)
 ```
 
 # data
 ```{r}
+# read the data
 metabolites <- read_excel("for_code_UNTX-07-23PHML+ DATA TABLES.xlsx", sheet = "Log Transformed Data")
+prepost <- read_excel("for_code_UNTX-07-23PHML+ DATA TABLES.xlsx", sheet = "prepost")
+request <- read_excel("for_code_Request analysis_FFHwang 0520.xlsx")
 
 metabolites <- as.data.frame(metabolites)
+prepost <- as.data.frame(prepost)
+request <- as.data.frame(request)
 
-# change to numeric
+# request change col name
+request %<>% rename(Time = `Time (1=pre; 2=post)`)
+
+# request change the format of dates
+request$`Sampled date` <- format(as.Date(request$`Sampled date`), "%m%d%y")
+
+# Identify Sample IDs that have both 1 and 2 in request
+valid_ids <- request %>%
+  group_by(`Sample ID`) %>%
+  summarise(unique_times = n_distinct(Time))%>%
+  filter(unique_times > 1) %>%
+  pull(`Sample ID`)
+
+# drop Sample ID only has 1 or 2 in request_clear
+request_clear <- request %>%
+  filter(`Sample ID` %in% valid_ids) %>%
+  arrange(`Sample ID`,Time)
+
+# merge Sample ID and Sampled date for left_join in request_clear
+request_clear <- request_clear %>% 
+  mutate(CLIENT_SAMPLE_ID2 = paste(`Sample ID`, `Sampled date`, sep = " "))
+
+# separate the ID column into 2
+# prepost <- prepost %>%
+#   separate(col=`CLIENT_SAMPLE_ID2`,
+#            into = c("Sample ID", "Sampled date"),
+#            sep = " ",
+#            fill = "right")
+# prepost %<>% arrange(`Sample ID`)
+
+
+# left join the pre and post from request analysis
+prepost_clear <- prepost %>% left_join(request_clear[,-c(5:6)], by = "CLIENT_SAMPLE_ID2") %>%
+  arrange(`Sample ID`,Time)
+
+# prepost_clear: drop those single Sample ID
+prepost_clear <- na.omit(prepost_clear)
+
+# metabolites: change to numeric
 metabolites[,-1] <- apply(metabolites[,-1], 2, as.numeric) 
+
+# left_join metabolites
+metabolites_clear <- prepost_clear %>% 
+  left_join(metabolites, by = "PARENT_SAMPLE_NAME") %>%
+  select(-CLIENT_SAMPLE_ID2,-`Sampled date`) %>%
+  arrange(`Sample ID`,Time)
+
+# divide metabolites_clear into pre and post
+pre <- metabolites_clear %>% filter(Time==1) %>% arrange(`Sample ID`)
+post <- metabolites_clear %>% filter(Time==2) %>% arrange(`Sample ID`)
+
+# calculate the difference
+metabolites_diff <- metabolites_clear %>%
+  group_by(`Sample ID`) %>%
+  summarise(across(where(is.numeric), ~ .[Time==2]-.[Time==1]))%>%
+  select(-Time)
+
+metabolites_diff<- as.data.frame(metabolites_diff)
+```
+
+paired t test and Bonferroni correction
+```{r}
+# Select only numeric columns for analysis
+numeric_cols <- names(metabolites_clear)[sapply(metabolites_clear, is.numeric)]
+numeric_cols <- setdiff(numeric_cols, "Time")  # Remove "Time" column
+
+# Perform paired t-test for each variable
+t_test_results <- lapply(numeric_cols, function(var) {
+  t_test <- t.test(pre[[var]], post[[var]], paired = TRUE)
+  return(c(var, t_test$statistic, t_test$p.value))
+})
+
+# Convert list to dataframe
+t_test_df <- as.data.frame(do.call(rbind, t_test_results))
+colnames(t_test_df) <- c("CHEM_ID", "t_statistic", "p_value")
+
+# Convert numeric columns to proper format
+t_test_df$t_statistic <- as.numeric(t_test_df$t_statistic)
+t_test_df$p_value <- as.numeric(t_test_df$p_value)
+
+# Number of tests
+num_tests <- nrow(t_test_df)
+
+# Bonferroni-corrected p-value threshold (adjusted significance level)
+alpha <- 0.05
+bonferroni_threshold <- alpha / num_tests
+
+# Apply Bonferroni correction
+t_test_df$adjusted_p_value <- p.adjust(t_test_df$p_value, method = "bonferroni")
+t_test_df$significant <- t_test_df$adjusted_p_value < alpha
+
+# View final results with correction
+print(t_test_df)
+
+# filter the significant chemicals
+t_test_clear <- t_test_df %>%
+  filter(significant==TRUE)
+
+# get the CHEM_ID of significant Chemicals
+significant_CHEM <- t_test_clear$CHEM_ID
+
+# clear the metabolites
+metabolites_sig <- metabolites_diff %>%
+  select(`Sample ID`, all_of(significant_CHEM))
+
+# metabolites with pre and post
+metabolites_sig_prepost <- metabolites_clear %>%
+  select(`Sample ID`, Time, Group, all_of(significant_CHEM))
+
+# write_xlsx(metabolites_sig, "metabolites_sig.xlsx")
 ```
 
 
 # Normality Check
 ## Histograms
 ```{r}
-# randomly select 10 columns to make histogram
-set.seed(123)
-sample_columns <- sample(names(metabolites), 10)
+# # randomly select 10 columns to make histogram
+# set.seed(123)
+# sample_columns <- sample(names(metabolites), 10)
 
 # get the 10 columns from the metabolites to form a sample dataset
-sample <- metabolites %>% select(all_of(sample_columns))
+sample <- metabolites_sig[,-1]
 
 # draw the histograms
-par(mfrow=c(2,5))
+par(mfrow=c(6,5))
 for (col in names(sample)){
   sample_data <- sample[[col]]
   hist(sample_data, main=paste(col), xlab = "values", col="lightblue", border="black")
@@ -47,10 +163,10 @@ for (col in names(sample)){
 ## Shapiro-Wilk Test
 ```{r}
 # Identify columns with variation
-valid_columns <- apply(metabolites[, -1], 2, function(x) length(unique(x)) > 1)
+# valid_columns <- apply(metabolites_diff[, -1], 2, function(x) length(unique(x)) > 1)
 
 # Run Shapiro-Wilk test only on columns with variation
-shapiro_results <- apply(metabolites[, -1][, valid_columns], 2, function(x) shapiro.test(x)$p.value)
+shapiro_results <- apply(metabolites_diff[, -1], 2, function(x) shapiro.test(x)$p.value)
 
 # Display normal columns (p > 0.05)
 normal_columns <- names(shapiro_results[shapiro_results > 0.05])
@@ -65,42 +181,73 @@ print(not_normal_columns)
 ```{r}
 # organize the data
 # pivot_longer
-sample_long <- sample %>% pivot_longer(cols = everything(),names_to = "CHEM_ID", values_to = "Values") %>% arrange(CHEM_ID)
+sample_long <- sample %>% 
+  pivot_longer(cols = everything(),names_to = "CHEM_ID", values_to = "Values") %>% 
+  arrange(CHEM_ID)
+
+sample_long <- sample_long %>%
+  group_by(CHEM_ID) %>%
+  mutate(max = max(Values)) %>%
+  ungroup() %>%
+  arrange(desc(max)) %>%
+  mutate(CHEM_ID = factor(CHEM_ID, levels = unique(CHEM_ID)))
 
 # add shapiro_results to the long data
 # change shapiro_result to data frame
-shapiro_results <- as.data.frame(shapiro_results)
-
-# add a CHEM_ID column
-shapiro_results$CHEM_ID <- rownames(shapiro_results)
-
-# filter the rows for the sample
-sample_result <- shapiro_results %>% filter(CHEM_ID %in% sample_columns)
-
-# add the p-values to the sample_long data
-sample_long <- sample_long %>% 
-  left_join(sample_result, by="CHEM_ID")
-
-# add the stars to represent significance of Shapiro-Wilk test
-sample_long <- sample_long %>% mutate(
-    significance = case_when(
-      shapiro_results < 0.001 ~ "***",
-      shapiro_results < 0.01 ~ "**",
-      shapiro_results < 0.05 ~ "*",
-      TRUE ~ NA
-    )
-  )
+# shapiro_results <- as.data.frame(shapiro_results)
+# 
+# # add a CHEM_ID column
+# shapiro_results$CHEM_ID <- rownames(shapiro_results)
+# 
+# # filter the rows for the sample
+# sample_result <- shapiro_results %>% filter(CHEM_ID %in% significant_CHEM)
+# 
+# # add the p-values to the sample_long data
+# sample_long <- sample_long %>% 
+#   left_join(sample_result, by="CHEM_ID")
+# 
+# # add the stars to represent significance of Shapiro-Wilk test
+# sample_long <- sample_long %>% mutate(
+#     significance = case_when(
+#       shapiro_results < 0.001 ~ "***",
+#       shapiro_results < 0.01 ~ "**",
+#       shapiro_results < 0.05 ~ "*",
+#       TRUE ~ NA
+#     )
+#   )
 
 # box plot
+# ggplot(sample_long, aes(x = CHEM_ID, y = Values)) +
+#   geom_boxplot(na.rm = TRUE, fill = "yellow", color = "black") +
+#   geom_text(
+#     data = sample_long,
+#     aes(x = CHEM_ID, y = max(sample_long$Values, na.rm = TRUE) + 0.01, label = significance), 
+#     color = "black", size = 5, vjust = 0) +
+#   theme_minimal() 
+
 ggplot(sample_long, aes(x = CHEM_ID, y = Values)) +
   geom_boxplot(na.rm = TRUE, fill = "yellow", color = "black") +
-  geom_text(
-    data = sample_long,
-    aes(x = CHEM_ID, y = max(sample_long$Values, na.rm = TRUE) + 0.01, label = significance), 
-    color = "black", size = 5, vjust = 0) +
-  theme_minimal() 
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1)
+    # panel.background = element_rect(fill = "white", color = "black"),  # White panel with black border
+    # plot.background = element_rect(fill = "white", color = NA)  # White outer background
+    )+
+  labs(title = "Box Plot of significant difference")
 
 ```
+box plot of pre and post
+```{r}
+df_long <- melt(metabolites_sig_prepost, id.vars = c("Group","Time","Sample ID"), measure.vars = c(significant_CHEM), variable.name = "CHEM_ID", value.name="Values")
+df_long %<>% arrange(CHEM_ID, Time)
+
+ggplot(df_long, aes(x = CHEM_ID, y = Values, fill = as.factor(Time))) +
+  geom_boxplot() +
+  labs(title = "Box Plot of Pre vs Post", fill = "Time") +
+  scale_fill_manual(values = c("1" = "lightblue", "2" = "yellow")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
 
 # summary statistics
 ```{r}
