@@ -16,12 +16,13 @@ library(reshape2)
 ```
 
 # data
+**metabolites_clear** is the samples with both post and pre. We deleted the single sample.
+**metabolites_diff** is the difference between post and pre.
 ```{r}
 # read the data
 metabolites <- read_excel("for_code_UNTX-07-23PHML+ DATA TABLES.xlsx", sheet = "Log Transformed Data")
 prepost <- read_excel("for_code_UNTX-07-23PHML+ DATA TABLES.xlsx", sheet = "prepost")
 request <- read_excel("for_code_Request analysis_FFHwang 0520.xlsx")
-
 metabolites <- as.data.frame(metabolites)
 prepost <- as.data.frame(prepost)
 request <- as.data.frame(request)
@@ -31,13 +32,16 @@ request %<>% rename(Time = `Time (1=pre; 2=post)`)
 
 # request change the format of dates
 request$`Sampled date` <- format(as.Date(request$`Sampled date`), "%m%d%y")
+```
 
+get the **metabolites_clear** and **metabolites_diff**
+```{r}
 # Identify Sample IDs that have both 1 and 2 in request
 valid_ids <- request %>%
   group_by(`Sample ID`) %>%
   summarise(unique_times = n_distinct(Time))%>%
-  filter(unique_times > 1) %>%
-  pull(`Sample ID`)
+  filter(unique_times > 1) %>% # Keeps only rows where unique_times > 1
+  pull(`Sample ID`) # Extracts only the Sample ID column as a vector
 
 # drop Sample ID only has 1 or 2 in request_clear
 request_clear <- request %>%
@@ -86,11 +90,45 @@ metabolites_diff <- metabolites_clear %>%
 metabolites_diff<- as.data.frame(metabolites_diff)
 ```
 
-paired t test and Bonferroni correction
+**metabolites_new** has both pairs and single sample
+```{r}
+# merge Sample ID and Sampled date for left_join in request
+request_new <- request %>% 
+  mutate(CLIENT_SAMPLE_ID2 = paste(`Sample ID`, `Sampled date`, sep = " "))
+
+# separate the ID column into 2
+# prepost <- prepost %>%
+#   separate(col=`CLIENT_SAMPLE_ID2`,
+#            into = c("Sample ID", "Sampled date"),
+#            sep = " ",
+#            fill = "right")
+# prepost %<>% arrange(`Sample ID`)
+
+
+# left join the pre and post from request analysis
+prepost_new <- prepost %>% left_join(request_new[,-c(5:6)], by = "CLIENT_SAMPLE_ID2") %>%
+  arrange(`Sample ID`,Time)
+
+# prepost_new: drop na
+prepost_new <- na.omit(prepost_new)
+
+# left_join metabolites
+metabolites_new <- prepost_new %>% 
+  left_join(metabolites, by = "PARENT_SAMPLE_NAME") %>%
+  select(-CLIENT_SAMPLE_ID2,-`Sampled date`) %>%
+  arrange(`Sample ID`,Time)
+```
+
+
+# paired t test and Bonferroni correction to clean the data
+
+**metabolites_sig** is gained from metabolites_diff, representing the difference values of metabolites that are significant in paired t test.
+**metabolites_sig_prepost** is gained from metabolites_clear, representing the pairs (post and pre values) of metabolites that are significant in paired t-test.
+**metabolites_new_sig** is gained from metabolites_new.
 ```{r}
 # Select only numeric columns for analysis
 numeric_cols <- names(metabolites_clear)[sapply(metabolites_clear, is.numeric)]
-numeric_cols <- setdiff(numeric_cols, "Time")  # Remove "Time" column
+numeric_cols <- setdiff(numeric_cols, "Time")  # Remove "Time" column: find all rows in numeric_cols that aren't in "Time"
 
 # Perform paired t-test for each variable
 t_test_results <- lapply(numeric_cols, function(var) {
@@ -126,7 +164,9 @@ t_test_clear <- t_test_df %>%
 
 # get the CHEM_ID of significant Chemicals
 significant_CHEM <- t_test_clear$CHEM_ID
+```
 
+```{r}
 # clear the metabolites
 metabolites_sig <- metabolites_diff %>%
   select(`Sample ID`, all_of(significant_CHEM))
@@ -135,6 +175,9 @@ metabolites_sig <- metabolites_diff %>%
 metabolites_sig_prepost <- metabolites_clear %>%
   select(`Sample ID`, Time, Group, all_of(significant_CHEM))
 
+# all paired and single metabolites
+metabolites_new_sig <- metabolites_new %>%
+  select(PARENT_SAMPLE_NAME, `Sample ID`, Time, Group, all_of(significant_CHEM))
 # write_xlsx(metabolites_sig, "metabolites_sig.xlsx")
 ```
 
@@ -142,12 +185,6 @@ metabolites_sig_prepost <- metabolites_clear %>%
 # Normality Check
 ## Histograms
 ```{r}
-# # randomly select 10 columns to make histogram
-# set.seed(123)
-# sample_columns <- sample(names(metabolites), 10)
-
-# get the 10 columns from the metabolites to form a sample dataset
-sample <- metabolites_sig[,-1]
 
 # draw the histograms
 par(mfrow=c(6,5))
@@ -177,76 +214,193 @@ not_normal_columns <- names(shapiro_results[shapiro_results < 0.05])
 print(not_normal_columns)
 ```
 
-## Box Plot
+# Box Plot
 ```{r}
-# organize the data
-# pivot_longer
-sample_long <- sample %>% 
-  pivot_longer(cols = everything(),names_to = "CHEM_ID", values_to = "Values") %>% 
-  arrange(CHEM_ID)
+# organize the data to make box plot
+reshaped_cols <- colnames(metabolites_sig_prepost)[4:34]
+prepost_long <- melt(metabolites_sig_prepost, id.vars = c("Sample ID","Time","Group"), measure.vars = reshaped_cols, variable.name = "CHEM_ID", value.name="Values")
 
-sample_long <- sample_long %>%
+prepost_long <- prepost_long %>%
   group_by(CHEM_ID) %>%
   mutate(max = max(Values)) %>%
   ungroup() %>%
   arrange(desc(max)) %>%
   mutate(CHEM_ID = factor(CHEM_ID, levels = unique(CHEM_ID)))
 
-# add shapiro_results to the long data
-# change shapiro_result to data frame
-# shapiro_results <- as.data.frame(shapiro_results)
-# 
-# # add a CHEM_ID column
-# shapiro_results$CHEM_ID <- rownames(shapiro_results)
-# 
-# # filter the rows for the sample
-# sample_result <- shapiro_results %>% filter(CHEM_ID %in% significant_CHEM)
-# 
-# # add the p-values to the sample_long data
-# sample_long <- sample_long %>% 
-#   left_join(sample_result, by="CHEM_ID")
-# 
-# # add the stars to represent significance of Shapiro-Wilk test
-# sample_long <- sample_long %>% mutate(
-#     significance = case_when(
-#       shapiro_results < 0.001 ~ "***",
-#       shapiro_results < 0.01 ~ "**",
-#       shapiro_results < 0.05 ~ "*",
-#       TRUE ~ NA
-#     )
-#   )
-
-# box plot
-# ggplot(sample_long, aes(x = CHEM_ID, y = Values)) +
-#   geom_boxplot(na.rm = TRUE, fill = "yellow", color = "black") +
-#   geom_text(
-#     data = sample_long,
-#     aes(x = CHEM_ID, y = max(sample_long$Values, na.rm = TRUE) + 0.01, label = significance), 
-#     color = "black", size = 5, vjust = 0) +
-#   theme_minimal() 
-
-ggplot(sample_long, aes(x = CHEM_ID, y = Values)) +
-  geom_boxplot(na.rm = TRUE, fill = "yellow", color = "black") +
-  theme(
-    axis.text.x = element_text(angle = 90, hjust = 1)
-    # panel.background = element_rect(fill = "white", color = "black"),  # White panel with black border
-    # plot.background = element_rect(fill = "white", color = NA)  # White outer background
-    )+
-  labs(title = "Box Plot of significant difference")
+# Convert Time to a factor and explicitly set the order
+prepost_long$Time <- factor(prepost_long$Time, levels = c("1", "2"), labels = c("pre-fire", "post-fire"))
 
 ```
-box plot of pre and post
+
+box plot for pre and post fire
 ```{r}
-df_long <- melt(metabolites_sig_prepost, id.vars = c("Group","Time","Sample ID"), measure.vars = c(significant_CHEM), variable.name = "CHEM_ID", value.name="Values")
-df_long %<>% arrange(CHEM_ID, Time)
+ggplot(prepost_long, aes(x = CHEM_ID, y = Values, fill = Time)) +
+  geom_boxplot(na.rm = TRUE) +
+  scale_fill_manual(
+    values = c("pre-fire" = "yellow", "post-fire" = "orange"),
+    name = "Time"
+  )+
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    #panel.background = element_rect(fill = "white", color = "black"),  # White panel with black border
+    #plot.background = element_rect(fill = "white", color = NA)  # White outer background
+    panel.grid.major = element_blank(), 
+	  panel.grid.minor = element_blank(),
+	  panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    panel.spacing.x = unit(8, "lines")
+    )+
+  labs(title = "Box Plot of Metabolites with Significant Differences in Paired t-Test ")
 
-ggplot(df_long, aes(x = CHEM_ID, y = Values, fill = as.factor(Time))) +
-  geom_boxplot() +
-  labs(title = "Box Plot of Pre vs Post", fill = "Time") +
-  scale_fill_manual(values = c("1" = "lightblue", "2" = "yellow")) +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
+
+box plot for CF and VF
+```{r}
+ggplot(prepost_long, aes(x = CHEM_ID, y = Values, fill = Group)) +
+  geom_boxplot(na.rm = TRUE) +
+  scale_fill_manual(
+    values = c("CF" = "lightblue", "VF" = "lightpink"),
+    name = "CF/VF"
+  )+
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    panel.grid.major = element_blank(), 
+	  panel.grid.minor = element_blank(),
+	  panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    panel.spacing.x = unit(8, "lines")
+    )+
+  labs(title = "Box Plot of Metabolites with Significant Differences in Paired t-Test ")
+
+```
+
+
+# Linear Mixed Model
+## build a linear mixed models
+to find if there is any difference varying by time (pre and post)
+```{r}
+library(lme4)
+
+metabolites_new_sig$Time <- as.factor(metabolites_new_sig$Time)
+metabolites_new_sig$`Sample ID` <- as.factor(metabolites_new_sig$`Sample ID`)
+
+# Example for one metabolite (replace 'Metabolite_X' with actual column name)
+# model <- lmer(`209` ~ Time + (1 | `Sample ID`), data = metabolites_new_sig)
+# summary(model)
+
+results <- lapply(names(metabolites_new_sig)[5:ncol(metabolites_new_sig)], 
+                  function(metabolite) {
+                     formula_str <- paste0("`", metabolite, "` ~ Time + (1 | `Sample ID`)")
+                      model <- lmer(as.formula(formula_str), data = metabolites_new_sig)
+                      summary(model)
+                      })
+# example
+formula_str <- paste0("`", "100003151", "` ~ Time + (1 | `Sample ID`)")
+
+```
+
+## get the p-values etc. from the models
+```{r}
+# Load necessary libraries
+library(lme4)
+library(lmerTest)  # To obtain p-values and degrees of freedom
+library(broom.mixed)  # For confidence intervals
+library(openxlsx)  # To save results
+
+# Function to fit LMM and extract statistics
+results_df <- lapply(names(metabolites_new_sig)[5:ncol(metabolites_new_sig)], function(metabolite) {
+  
+  # Construct formula
+  formula_str <- paste0("`", metabolite, "` ~ Time + (1 | `Sample ID`)")
+  
+  # Fit model using lmerTest::lmer() to get df
+  model <- lmerTest::lmer(as.formula(formula_str), data = metabolites_new_sig)
+  
+  # Extract summary of fixed effects
+  summary_model <- summary(model)
+  
+  # Extract coefficient matrix and convert to data frame
+  fixed_effects <- as.data.frame(summary_model$coefficients)
+
+  # Extract correct degrees of freedom (df) for Time effect
+  df_time <- fixed_effects["Time2", "df"]  # Correct indexing
+
+  # Compute confidence intervals
+  ci <- confint(model, method = "Wald")
+
+  # Ensure "Time2" effect exists
+  time_effect_row <- which(rownames(fixed_effects) == "Time2")
+  
+  if (length(time_effect_row) > 0) {
+    return(data.frame(
+      Metabolite = metabolite,
+      Estimate = fixed_effects["Time2", "Estimate"],
+      Std_Error = fixed_effects["Time2", "Std. Error"],
+      t_value = fixed_effects["Time2", "t value"],
+      df = df_time,  # Correctly extracted degrees of freedom
+      p_value = fixed_effects["Time2", "Pr(>|t|)"],  # Directly extract p-value
+      CI_Lower = ci[time_effect_row + 1, 1],  # Lower 95% CI
+      CI_Upper = ci[time_effect_row + 1, 2]   # Upper 95% CI
+    ))
+  } else {
+    return(NULL)  # Return NULL if "Time2" effect is missing
+  }
+})
+
+# Combine results into a single data frame
+results_df <- do.call(rbind, results_df)
+
+# Mark the significance level
+results_df <- results_df %>%
+  mutate(
+    significance_original_p = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  )
+
+
+# Save results to Excel
+# write.xlsx(results_df, file = "LMM_results.xlsx", rowNames = FALSE)
+```
+
+## do multiple comparison correction
+alpha = 0.05 means that you expect 5 false positives just by chance.
+Multiple testing correction controls for this inflation to ensure that your significant results are truly meaningful.
+
+```{r}
+# Apply Bonferroni Correction
+results_df$bonferroni_p <- p.adjust(results_df$p_value, method = "bonferroni")
+
+# Apply Benjamini-Hochberg (BH) Correction (FDR)
+results_df$bh_p <- p.adjust(results_df$p_value, method = "BH")
+
+# get the significance
+results_df <- results_df %>%
+  mutate(
+    significance_bon_p = case_when(
+      bonferroni_p < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  ) %>%
+  mutate(
+    significance_bh_p = case_when(
+      bh_p < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  )
+
+# write.xlsx(results_df, file = "LMM_results.xlsx", rowNames = FALSE)
+
+
+```
+
+
+
+
+
 
 
 # summary statistics
