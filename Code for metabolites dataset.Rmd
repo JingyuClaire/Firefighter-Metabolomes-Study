@@ -16,6 +16,7 @@ library(reshape2)
 ```
 
 # data
+## metabolites data
 **metabolites_clear** is the samples with both post and pre. We deleted the single sample.
 **metabolites_diff** is the difference between post and pre.
 ```{r}
@@ -119,8 +120,21 @@ metabolites_new <- prepost_new %>%
   arrange(`Sample ID`,Time)
 ```
 
+## demographic information dataset
+```{r}
+demo <- read_excel("Demographic FF 0228.xlsx")
+demo$ID <- as.numeric(demo$ID)
+demo <- demo %>% 
+  mutate(Gender = ifelse(demo$Gender=="F", 1, 0)) %>%
+  rename(Female = Gender) %>%
+  mutate(`Current smoker` = ifelse(demo$`Current smoker`=="Y", 1, 0)) %>%
+  mutate(`Former smoker` = ifelse(demo$`Former smoker`=="Y", 1, 0)) %>%
+  rename(`Sample ID` = ID)
 
-# paired t test and Bonferroni correction to clean the data
+```
+
+
+# Paired t-test and Bonferroni correction to clean the data
 
 **metabolites_sig** is gained from metabolites_diff, representing the difference values of metabolites that are significant in paired t test.
 **metabolites_sig_prepost** is gained from metabolites_clear, representing the pairs (post and pre values) of metabolites that are significant in paired t-test.
@@ -281,23 +295,24 @@ to find if there is any difference varying by time (pre and post)
 ```{r}
 library(lme4)
 
-metabolites_new_sig$Time <- as.factor(metabolites_new_sig$Time)
-metabolites_new_sig$`Sample ID` <- as.factor(metabolites_new_sig$`Sample ID`)
+metabolites_new$Time <- as.factor(metabolites_new$Time)
+metabolites_new$`Sample ID` <- as.factor(metabolites_new$`Sample ID`)
 
 # Example for one metabolite (replace 'Metabolite_X' with actual column name)
-# model <- lmer(`209` ~ Time + (1 | `Sample ID`), data = metabolites_new_sig)
+# model <- lmer(`209` ~ Time + (1 | `Sample ID`), data = metabolites_new)
 # summary(model)
 
-results <- lapply(names(metabolites_new_sig)[5:ncol(metabolites_new_sig)], 
+results <- lapply(names(metabolites_new)[5:ncol(metabolites_new)], 
                   function(metabolite) {
                      formula_str <- paste0("`", metabolite, "` ~ Time + (1 | `Sample ID`)")
-                      model <- lmer(as.formula(formula_str), data = metabolites_new_sig)
+                      model <- lmer(as.formula(formula_str), data = metabolites_new)
                       summary(model)
                       })
 # example
-formula_str <- paste0("`", "100003151", "` ~ Time + (1 | `Sample ID`)")
+formula_str <- paste0("`", "212", "` ~ Time + (1 | `Sample ID`)")
 
 ```
+
 
 ## get the p-values etc. from the models
 ```{r}
@@ -306,45 +321,55 @@ library(lme4)
 library(lmerTest)  # To obtain p-values and degrees of freedom
 library(broom.mixed)  # For confidence intervals
 library(openxlsx)  # To save results
+library(dplyr)
+
+metabolites_new$Time <- as.factor(metabolites_new$Time)
+metabolites_new$`Sample ID` <- as.factor(metabolites_new$`Sample ID`)
 
 # Function to fit LMM and extract statistics
-results_df <- lapply(names(metabolites_new_sig)[5:ncol(metabolites_new_sig)], function(metabolite) {
-  
-  # Construct formula
-  formula_str <- paste0("`", metabolite, "` ~ Time + (1 | `Sample ID`)")
-  
-  # Fit model using lmerTest::lmer() to get df
-  model <- lmerTest::lmer(as.formula(formula_str), data = metabolites_new_sig)
-  
-  # Extract summary of fixed effects
-  summary_model <- summary(model)
-  
-  # Extract coefficient matrix and convert to data frame
-  fixed_effects <- as.data.frame(summary_model$coefficients)
-
-  # Extract correct degrees of freedom (df) for Time effect
-  df_time <- fixed_effects["Time2", "df"]  # Correct indexing
-
-  # Compute confidence intervals
-  ci <- confint(model, method = "Wald")
-
-  # Ensure "Time2" effect exists
-  time_effect_row <- which(rownames(fixed_effects) == "Time2")
-  
-  if (length(time_effect_row) > 0) {
-    return(data.frame(
-      Metabolite = metabolite,
-      Estimate = fixed_effects["Time2", "Estimate"],
-      Std_Error = fixed_effects["Time2", "Std. Error"],
-      t_value = fixed_effects["Time2", "t value"],
-      df = df_time,  # Correctly extracted degrees of freedom
-      p_value = fixed_effects["Time2", "Pr(>|t|)"],  # Directly extract p-value
-      CI_Lower = ci[time_effect_row + 1, 1],  # Lower 95% CI
-      CI_Upper = ci[time_effect_row + 1, 2]   # Upper 95% CI
-    ))
-  } else {
-    return(NULL)  # Return NULL if "Time2" effect is missing
-  }
+results_df <- lapply(names(metabolites_new)[5:ncol(metabolites_new)], function(metabolite) {
+  tryCatch({
+    # Construct formula
+    formula_str <- paste0("`", metabolite, "` ~ Time + (1 | `Sample ID`)")
+    
+    # Fit model using lmerTest::lmer() to get df
+    model <- lmerTest::lmer(as.formula(formula_str), data = metabolites_new)
+    
+    # Print if the model is singular
+    print(isSingular(model))
+    
+    # Extract summary of fixed effects
+    summary_model <- summary(model)
+    
+    # Extract coefficient matrix and convert to data frame
+    fixed_effects <- as.data.frame(summary_model$coefficients)
+    
+    # Extract correct degrees of freedom (df) for Time effect
+    df_time <- fixed_effects["Time2", "df"]  # Correct indexing
+    
+    # Compute confidence intervals
+    ci <- confint(model, method = "Wald")
+    
+    # Ensure "Time2" effect exists
+    time_effect_row <- which(rownames(fixed_effects) == "Time2")
+    
+    if (length(time_effect_row) > 0) {
+      return(data.frame(
+        Metabolite = metabolite,
+        Estimate = fixed_effects["Time2", "Estimate"],
+        Std_Error = fixed_effects["Time2", "Std. Error"],
+        t_value = fixed_effects["Time2", "t value"],
+        df = df_time,  # Correctly extracted degrees of freedom
+        p_value = fixed_effects["Time2", "Pr(>|t|)"],  # Directly extract p-value
+        CI_Lower = ci[time_effect_row + 1, 1],  # Lower 95% CI
+        CI_Upper = ci[time_effect_row + 1, 2]   # Upper 95% CI
+      ))
+    } else {
+      return(NULL)  # Return NULL if "Time2" effect is missing
+    }
+  }, error = function(e) {
+    return(NULL)  # Ignore errors and continue
+  })
 })
 
 # Combine results into a single data frame
@@ -361,10 +386,9 @@ results_df <- results_df %>%
     )
   )
 
-
-# Save results to Excel
-# write.xlsx(results_df, file = "LMM_results.xlsx", rowNames = FALSE)
+# write_xlsx(results_df, "LMM_results.xlsx")
 ```
+
 
 ## do multiple comparison correction
 alpha = 0.05 means that you expect 5 false positives just by chance.
@@ -394,12 +418,72 @@ results_df <- results_df %>%
 
 # write.xlsx(results_df, file = "LMM_results.xlsx", rowNames = FALSE)
 
+# filter out non-significant rows
+results_sig <- na.omit(results_df)
 
 ```
 
+## **common_CHEM_ID** the overlapped CHEM_ID with results_sig and metabolites_sig
+**metabo_diff_common** the overlapped metabolites from metabolites_diff
+**metabodiff_demo** metabo_diff_common + demo
+```{r}
+CHEM_ID_t_test <- colnames(metabolites_sig)[-1]
+CHEM_ID_LMM <- results_sig$Metabolite
+
+# Find common elements
+common_CHEM_ID <- intersect(CHEM_ID_t_test, CHEM_ID_LMM)
+
+common_CHEM_ID
+
+metabo_diff_common <- metabolites_diff %>%
+  select(1, all_of(common_CHEM_ID)) %>%
+  mutate(`Sample ID` = gsub("FFP01", "", `Sample ID`)) %>%
+  mutate(`Sample ID`= as.numeric(`Sample ID`))
+
+metabodiff_demo <- metabo_diff_common %>%
+  left_join(demo, metabo_diff_common, by = "Sample ID")
 
 
+```
 
+# correlation coefficient table
+```{r}
+demo_columns <- c("Age", "Height (m)", 
+                  "Weight (kg)", "Years served as a firefighter", 
+                  "Non-fire-related activities (times/week)", 
+                  "Fire-related activities (times/month)")
+
+# Generate the correlation coefficient table
+# input the missing data
+metabodiff_demo$`Years served as a firefighter`[7] = median(metabodiff_demo$`Years served as a firefighter`[-7])
+
+correlation_table <- metabodiff_demo %>%
+  select(all_of(c(common_CHEM_ID, demo_columns))) %>%
+  cor() %>%
+  .[common_CHEM_ID, demo_columns]
+
+# t-test and p-values
+get_p_values <- function(df, common_CHEM_ID, demo_columns) {
+  p_values <- matrix(NA, nrow = length(common_CHEM_ID), ncol = length(demo_columns))
+  rownames(p_values) <- common_CHEM_ID
+  colnames(p_values) <- demo_columns
+  
+  for (chem_id in common_CHEM_ID) {
+    for (demo_col in demo_columns) {
+      group1 <- metabodiff_demo[[chem_id]]
+      group2 <- metabodiff_demo[[demo_col]]
+      t_test_result <- t.test(group1, group2)
+      p_values[chem_id, demo_col] <- t_test_result$p.value
+    }
+  }
+  return(as.data.frame(p_values))
+}
+
+# Get p-values for the correlation table
+p_values_table <- get_p_values(metabodiff_demo, common_CHEM_ID, demo_columns)
+
+write.xlsx(p_values_table, file = "corr_p_values_table.xlsx", rowNames = FALSE)
+```
 
 
 
