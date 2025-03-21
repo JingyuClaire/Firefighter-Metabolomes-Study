@@ -134,11 +134,12 @@ demo <- demo %>%
 ```
 
 
-# Paired t-test and Bonferroni correction to clean the data
+# Step 1: Paired t-test and Bonferroni correction to clean the data 
+(to find metabolites that have significant difference before and after fire)
 
 **metabolites_sig** is gained from metabolites_diff, representing the difference values of metabolites that are significant in paired t test.
 **metabolites_sig_prepost** is gained from metabolites_clear, representing the pairs (post and pre values) of metabolites that are significant in paired t-test.
-**metabolites_new_sig** is gained from metabolites_new.
+**metabolites_new_sig** is gained from metabolites_new that has both paired and single sample. 
 ```{r}
 # Select only numeric columns for analysis
 numeric_cols <- names(metabolites_clear)[sapply(metabolites_clear, is.numeric)]
@@ -195,7 +196,24 @@ metabolites_new_sig <- metabolites_new %>%
 # write_xlsx(metabolites_sig, "metabolites_sig.xlsx")
 ```
 
+# summary statistics
+```{r}
+summary_table <- apply(metabolites[-1], 2, function(x) {
+  c(
+    Mean = mean(x, na.rm = TRUE),
+    Median = median(x, na.rm = TRUE),
+    Q1 = quantile(x, 0.25, na.rm = TRUE),
+    Q3 = quantile(x, 0.75, na.rm = TRUE),
+    Min = min(x, na.rm = TRUE),
+    Max = max(x, na.rm = TRUE)
+  )
+})
 
+# Convert to a data frame for better readability
+summary_table <- as.data.frame(t(summary_table))
+summary_table <- round(summary_table, 2)
+print(summary_table)
+```
 # Normality Check
 ## Histograms
 ```{r}
@@ -289,27 +307,27 @@ ggplot(prepost_long, aes(x = CHEM_ID, y = Values, fill = Group)) +
 ```
 
 
-# Linear Mixed Model
-## build a linear mixed models
+# Step 2: Linear Mixed Model (find sig, same as paired t-test)
+## build linear mixed models
 to find if there is any difference varying by time (pre and post)
 ```{r}
-library(lme4)
-
-metabolites_new$Time <- as.factor(metabolites_new$Time)
-metabolites_new$`Sample ID` <- as.factor(metabolites_new$`Sample ID`)
+# library(lme4)
+# 
+# metabolites_new$Time <- as.factor(metabolites_new$Time)
+# metabolites_new$`Sample ID` <- as.factor(metabolites_new$`Sample ID`)
 
 # Example for one metabolite (replace 'Metabolite_X' with actual column name)
 # model <- lmer(`209` ~ Time + (1 | `Sample ID`), data = metabolites_new)
 # summary(model)
 
-results <- lapply(names(metabolites_new)[5:ncol(metabolites_new)], 
-                  function(metabolite) {
-                     formula_str <- paste0("`", metabolite, "` ~ Time + (1 | `Sample ID`)")
-                      model <- lmer(as.formula(formula_str), data = metabolites_new)
-                      summary(model)
-                      })
-# example
-formula_str <- paste0("`", "212", "` ~ Time + (1 | `Sample ID`)")
+# results <- lapply(names(metabolites_new)[5:ncol(metabolites_new)], 
+#                   function(metabolite) {
+#                      formula_str <- paste0("`", metabolite, "` ~ Time + (1 | `Sample ID`)")
+#                       model <- lmer(as.formula(formula_str), data = metabolites_new)
+#                       summary(model)
+#                       })
+# # example
+# formula_str <- paste0("`", "212", "` ~ Time + (1 | `Sample ID`)")
 
 ```
 
@@ -336,7 +354,7 @@ results_df <- lapply(names(metabolites_new)[5:ncol(metabolites_new)], function(m
     model <- lmerTest::lmer(as.formula(formula_str), data = metabolites_new)
     
     # Print if the model is singular
-    print(isSingular(model))
+    # print(isSingular(model))
     
     # Extract summary of fixed effects
     summary_model <- summary(model)
@@ -390,7 +408,7 @@ results_df <- results_df %>%
 ```
 
 
-## do multiple comparison correction
+## do multiple comparison correction for LMM
 alpha = 0.05 means that you expect 5 false positives just by chance.
 Multiple testing correction controls for this inflation to ensure that your significant results are truly meaningful.
 
@@ -423,9 +441,9 @@ results_sig <- na.omit(results_df)
 
 ```
 
-## **common_CHEM_ID** the overlapped CHEM_ID with results_sig and metabolites_sig
-**metabo_diff_common** the overlapped metabolites from metabolites_diff
-**metabodiff_demo** metabo_diff_common + demo
+## **common_CHEM_ID** the overlapped CHEM_ID with results_sig (LMM) and metabolites_sig (t-test)
+**metabo_diff_common** get the overlapped metabolites from metabolites_diff (only difference of pairs)
+**metabodiff_demo** metabo_diff_common + demo: overlapped metabolites with demographic information
 ```{r}
 CHEM_ID_t_test <- colnames(metabolites_sig)[-1]
 CHEM_ID_LMM <- results_sig$Metabolite
@@ -447,18 +465,31 @@ metabodiff_demo <- metabo_diff_common %>%
 ```
 
 # correlation coefficient table
+in metabodiff_demo, all firefighters are white, only 2 of them are volunteers, none of them smoking, only one female
+**metaodiff_demo_clear** is cleared metabodiff_demo w/o race, CF/VF, smoke, female; and have one data imputed in "Years served as a firefighter"
+only "Fire-related activities (times/month)" has two non-significant p-values
 ```{r}
-demo_columns <- c("Age", "Height (m)", 
-                  "Weight (kg)", "Years served as a firefighter", 
+demo_columns <- c("Age", "BMI", "Years served as a firefighter", 
                   "Non-fire-related activities (times/week)", 
                   "Fire-related activities (times/month)")
 
-# Generate the correlation coefficient table
-# input the missing data
-metabodiff_demo$`Years served as a firefighter`[7] = median(metabodiff_demo$`Years served as a firefighter`[-7])
+# Transform Height and Weight to BMI
+metabodiff_demo <- metabodiff_demo %>%
+  mutate(BMI = `Weight (kg)`/(`Height (m)`)^2)
 
-correlation_table <- metabodiff_demo %>%
-  select(all_of(c(common_CHEM_ID, demo_columns))) %>%
+metabodiff_demo_clear <- metabodiff_demo %>% 
+  select(all_of(c("Sample ID",common_CHEM_ID, demo_columns)))
+
+# input the missing data
+library(mice)
+# m=1 specifies the number of multiple imputations (since you have only one missing value, one imputation is sufficient).
+# method='pmm' specifies the predictive mean matching method.
+# seed=500 sets a seed for reproducibility.
+imputed_data <- mice(metabodiff_demo_clear, m=1, method='pmm', seed=500)
+metabodiff_demo_clear <- complete(imputed_data, 1)
+
+# Generate the correlation coefficient table
+correlation_table <- metabodiff_demo_clear %>%
   cor() %>%
   .[common_CHEM_ID, demo_columns]
 
@@ -480,29 +511,134 @@ get_p_values <- function(df, common_CHEM_ID, demo_columns) {
 }
 
 # Get p-values for the correlation table
-p_values_table <- get_p_values(metabodiff_demo, common_CHEM_ID, demo_columns)
+p_values_table <- get_p_values(metabodiff_demo_clear, common_CHEM_ID, demo_columns)
 
-write.xlsx(p_values_table, file = "corr_p_values_table.xlsx", rowNames = FALSE)
+# write.xlsx(p_values_table, file = "corr_p_values_table.xlsx", rowNames = FALSE)
 ```
 
 
-
-# summary statistics
+# Step 3: Build 2nd model: Linear Mixed Model with all covariates: 
+"Age", "BMI", "Years served as a firefighter",
+"Non-fire-related activities (times/week)",
+"Fire-related activities (times/month)"
+Based on the result we got from the above, we have metabolites that have significant difference, common_CHEM_ID, then extract the common_CHEM_ID from the metabolites_new.
 ```{r}
-summary_table <- apply(metabolites[-1], 2, function(x) {
-  c(
-    Mean = mean(x, na.rm = TRUE),
-    Median = median(x, na.rm = TRUE),
-    Q1 = quantile(x, 0.25, na.rm = TRUE),
-    Q3 = quantile(x, 0.75, na.rm = TRUE),
-    Min = min(x, na.rm = TRUE),
-    Max = max(x, na.rm = TRUE)
-  )
+
+# combine the demo to metabolites_new (pairs and single)
+metabolites_new_common <- metabolites_new %>%
+  select(1:4, all_of(common_CHEM_ID)) %>%
+  mutate(`Sample ID` = gsub("^([0-9]{1,2}).*", "\\1", `Sample ID`)) %>%
+  mutate(`Sample ID` = as.numeric(`Sample ID`))
+
+metabonew_demo <- metabolites_new_common %>%
+  left_join(demo, metabolites_new_common, by = "Sample ID")
+
+# Transform Height and Weight to BMI
+metabonew_demo <- metabonew_demo %>%
+  mutate(BMI = `Weight (kg)`/(`Height (m)`)^2)
+
+metabonew_demo_clear <- metabonew_demo %>% 
+  select(all_of(c("Sample ID","Time", "Group", "Current smoker", "Former smoker", common_CHEM_ID, demo_columns)))
+
+# input the missing data
+imputed_data <- mice(metabonew_demo_clear, m=1, method='pmm', predictorMatrix = make.predictorMatrix(metabonew_demo_clear))
+
+pred <- make.predictorMatrix(metabonew_demo_clear)
+pred[, "Non-fire-related activities (times/week)"] <- 0
+pred[, "Fire-related activities (times/month)"] <- 0
+pred["Non-fire-related activities (times/week)", ] <- 1
+pred["Fire-related activities (times/month)", ] <- 1
+
+imputed_data <- mice(metabonew_demo_clear, m=1, method='pmm', predictorMatrix = pred, seed=500)
+
+metabonew_demo_clear <- complete(imputed_data, 1)
+
+# Function to fit LMM and extract statistics
+results_df_2 <- lapply(common_CHEM_ID, function(metabolite) {
+  tryCatch({
+    # Construct formula with additional covariates
+    formula_str <- paste0("`", metabolite, "` ~ Time + Age + BMI + `Years served as a firefighter` + `Non-fire-related activities (times/week)` + `Fire-related activities (times/month)` + Group + `Current smoker` + `Former smoker` + (1 | `Sample ID`)")
+    
+    # Fit model using lmerTest::lmer() to get df
+    model <- lmerTest::lmer(as.formula(formula_str), data = metabonew_demo_clear)
+    
+    # Extract summary of fixed effects
+    summary_model <- summary(model)
+    
+    # Extract coefficient matrix and convert to data frame
+    fixed_effects <- as.data.frame(summary_model$coefficients)
+    
+    # Compute confidence intervals
+    ci <- confint(model, method = "Wald")
+    
+    # Extract statistics for each covariate
+    covariates <- c("Time2", "Age", "BMI", "`Years served as a firefighter`", "`Non-fire-related activities (times/week)`", "`Fire-related activities (times/month)`", "GroupVF", "`Current smoker`", "`Former smoker`")
+    results_list <- lapply(covariates, function(covariate) {
+      if (covariate %in% rownames(fixed_effects)) {
+        return(data.frame(
+          Metabolite = metabolite,
+          Covariate = covariate,
+          Estimate = fixed_effects[covariate, "Estimate"],
+          Std_Error = fixed_effects[covariate, "Std. Error"],
+          t_value = fixed_effects[covariate, "t value"],
+          df = fixed_effects[covariate, "df"],
+          p_value = fixed_effects[covariate, "Pr(>|t|)"],
+          CI_Lower = ci[covariate, 1],
+          CI_Upper = ci[covariate, 2]
+        ))
+      } else {
+        return(NULL)
+      }
+    })
+    
+    # Combine results for all covariates
+    do.call(rbind, results_list)
+  }, error = function(e) {
+    return(NULL)  # Ignore errors and continue
+  })
 })
 
-# Convert to a data frame for better readability
-summary_table <- as.data.frame(t(summary_table))
-summary_table <- round(summary_table, 2)
-print(summary_table)
+# Combine results into a single data frame
+results_df_2 <- do.call(rbind, results_df_2)
+
+# Mark the significance level
+results_df_2 <- results_df_2 %>%
+  mutate(
+    significance_original_p = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  )
 ```
 
+
+```{r}
+# Apply Bonferroni Correction
+results_df_2$bonferroni_p <- p.adjust(results_df_2$p_value, method = "bonferroni")
+
+# Apply Benjamini-Hochberg (BH) Correction (FDR)
+results_df_2$bh_p <- p.adjust(results_df_2$p_value, method = "BH")
+
+# get the significance
+results_df_2 <- results_df_2 %>%
+  mutate(
+    significance_bon_p = case_when(
+      bonferroni_p < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  ) %>%
+  mutate(
+    significance_bh_p = case_when(
+      bh_p < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  )
+
+# write.xlsx(results_df_2, file = "LMM_results_2.xlsx", rowNames = FALSE)
+
+# filter out non-significant rows
+results_sig_2 <- na.omit(results_df_2)
+
+```
