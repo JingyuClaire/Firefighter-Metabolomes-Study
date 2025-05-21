@@ -1,0 +1,43 @@
+---
+title: "Code_Type"
+author: "Jingyu Liang"
+date: "2025-05-21"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Run the "data" section in Code_Time first
+# PLSDA plot: VF vs CF
+```{r}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#      install.packages("BiocManager")
+# BiocManager::install("mixOmics")
+ library(mixOmics)
+
+# Simulate X (metabolites) and Y (group labels)
+
+X <- metabolites_new[,5:1528]
+
+# identify zero variance col
+zero_var_cols <- which(apply(X, 2, function(col) sd(col, na.rm = TRUE) == 0))
+zero_var_names <- colnames(X)[zero_var_cols]
+
+# Remove variables with zero variance
+X <- X[, apply(X, 2, function(col) sd(col, na.rm = TRUE) != 0)]
+
+# VF vs CF
+Y <- factor(metabolites_new$Group)
+
+set.seed(123)
+plsda_result <- plsda(X, Y, ncomp = 2)  # 2 components
+plotIndiv(plsda_result,
+          comp = c(1, 2),
+          group = Y,
+          legend = TRUE,
+          ellipse = TRUE,
+          title = "PLS-DA Score Plot")
+```
+

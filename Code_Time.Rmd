@@ -1,0 +1,895 @@
+---
+title: "Code for Metabolites Dataset"
+author: "Jingyu Liang"
+date: "2025-01-23"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(writexl)
+library(reshape2)
+library(mice) # input the missing data
+library(ggrepel)
+```
+
+# data
+## metabolites data
+**metabolites_clear** is the samples with both post and pre. We deleted the single sample.
+**metabolites_diff** is the difference between post and pre.
+```{r}
+# read the data
+metabolites <- read_excel("for_code_UNTX-07-23PHML+ DATA TABLES.xlsx", sheet = "Log Transformed Data")
+prepost <- read_excel("for_code_UNTX-07-23PHML+ DATA TABLES.xlsx", sheet = "prepost")
+request <- read_excel("for_code_Request analysis_FFHwang 0520.xlsx")
+metabolites <- as.data.frame(metabolites)
+prepost <- as.data.frame(prepost)
+request <- as.data.frame(request)
+
+# request dataset change col name
+request %<>% rename(Time = `Time (1=pre; 2=post)`)
+
+# request dataset change the format of dates
+request$`Sampled date` <- format(as.Date(request$`Sampled date`), "%m%d%y")
+```
+
+get the **metabolites_clear** and **metabolites_diff**
+```{r}
+# Identify Sample IDs that have both 1 and 2 in request
+valid_ids <- request %>%
+  group_by(`Sample ID`) %>%
+  summarise(unique_times = n_distinct(Time))%>%
+  filter(unique_times > 1) %>% # Keeps only rows where unique_times > 1
+  pull(`Sample ID`) # Extracts only the Sample ID column as a vector
+
+# drop Sample ID only has 1 or 2 in request_clear
+request_clear <- request %>%
+  filter(`Sample ID` %in% valid_ids) %>%
+  arrange(`Sample ID`,Time)
+
+# merge Sample ID and Sampled date for left_join in request_clear
+request_clear <- request_clear %>% 
+  mutate(CLIENT_SAMPLE_ID2 = paste(`Sample ID`, `Sampled date`, sep = " "))
+
+# separate the ID column into 2
+# prepost <- prepost %>%
+#   separate(col=`CLIENT_SAMPLE_ID2`,
+#            into = c("Sample ID", "Sampled date"),
+#            sep = " ",
+#            fill = "right")
+# prepost %<>% arrange(`Sample ID`)
+
+
+# left join the pre and post from request analysis
+prepost_clear <- prepost %>% left_join(request_clear[,-c(5:6)], by = "CLIENT_SAMPLE_ID2") %>%
+  arrange(`Sample ID`,Time)
+
+# prepost_clear: drop those single Sample ID
+prepost_clear <- na.omit(prepost_clear)
+
+# metabolites: change to numeric
+metabolites[,-1] <- apply(metabolites[,-1], 2, as.numeric) 
+
+# left_join metabolites
+metabolites_clear <- prepost_clear %>% 
+  left_join(metabolites, by = "PARENT_SAMPLE_NAME") %>%
+  dplyr::select(-`CLIENT_SAMPLE_ID2`,-`Sampled date`) %>%
+  arrange(`Sample ID`,Time)
+
+# divide metabolites_clear into pre and post
+pre <- metabolites_clear %>% filter(Time==1) %>% arrange(`Sample ID`)
+post <- metabolites_clear %>% filter(Time==2) %>% arrange(`Sample ID`)
+
+# calculate the difference
+metabolites_diff <- metabolites_clear %>%
+  group_by(`Sample ID`) %>%
+  summarise(across(where(is.numeric), ~ .[Time==2]-.[Time==1]))%>%
+  dplyr::select(-Time)
+
+metabolites_diff<- as.data.frame(metabolites_diff)
+```
+
+**metabolites_new** has *both* pairs and single sample
+```{r}
+# merge Sample ID and Sampled date for left_join in request
+request_new <- request %>% 
+  mutate(CLIENT_SAMPLE_ID2 = paste(`Sample ID`, `Sampled date`, sep = " "))
+
+# separate the ID column into 2
+# prepost <- prepost %>%
+#   separate(col=`CLIENT_SAMPLE_ID2`,
+#            into = c("Sample ID", "Sampled date"),
+#            sep = " ",
+#            fill = "right")
+# prepost %<>% arrange(`Sample ID`)
+
+
+# left join the pre and post from request analysis
+prepost_new <- prepost %>% left_join(request_new[,-c(5:6)], by = "CLIENT_SAMPLE_ID2") %>%
+  arrange(`Sample ID`,Time)
+
+# prepost_new: drop na
+prepost_new <- na.omit(prepost_new)
+
+# left_join metabolites
+metabolites_new <- prepost_new %>% 
+  left_join(metabolites, by = "PARENT_SAMPLE_NAME") %>%
+  dplyr::select(-CLIENT_SAMPLE_ID2,-`Sampled date`) %>%
+  arrange(`Sample ID`,Time)
+```
+
+## demographic information dataset & impute missing value
+demo_all: contains all covariates
+demo_select: remove Female, Race,firefighter type, smoke
+```{r}
+demo <- read_excel("Demographic FF 0228.xlsx")
+demo$ID <- as.numeric(demo$ID)
+demo <- demo %>% 
+  mutate(Gender = ifelse(demo$Gender=="F", 1, 0)) %>%
+  rename(Female = Gender) %>%
+  mutate(`Current smoker` = ifelse(demo$`Current smoker`=="Y", 1, 0)) %>%
+  mutate(`Former smoker` = ifelse(demo$`Former smoker`=="Y", 1, 0)) %>%
+  rename(`Sample ID` = ID) %>%
+  mutate(BMI = `Weight (kg)`/(`Height (m)`)^2)
+
+# divide into two datasets: for all covariates and selected covariates
+demo_columns_all <- c("Age","Female", "Race",
+                      "Firefighter type", "BMI", 
+                      "Years served as a firefighter",
+                      "Non-fire-related activities (times/week)",
+                      "Fire-related activities (times/month)",
+                      "Current smoker","Former smoker" )
+demo_columns_select <- c("Age", "BMI", 
+                         "Years served as a firefighter",
+                         "Non-fire-related activities (times/week)",
+                         "Fire-related activities (times/month)")
+demo_all <- demo %>%
+  dplyr::select(1, all_of(demo_columns_all))
+```
+
+## input the missing data
+```{r}
+imputed_data <- mice(demo_all, m=1, method='pmm', predictorMatrix = make.predictorMatrix(demo_all))
+
+pred <- make.predictorMatrix(demo_all)
+pred[, "Non-fire-related activities (times/week)"] <- 0
+pred[, "Fire-related activities (times/month)"] <- 0
+pred["Non-fire-related activities (times/week)", ] <- 1
+pred["Fire-related activities (times/month)", ] <- 1
+
+imputed_data <- mice(demo_all, m=1, method='pmm', predictorMatrix = pred, seed=500)
+
+demo_all <- complete(imputed_data, 1)
+
+demo_select <- demo_all %>%
+  dplyr::select(1, all_of(demo_columns_select))
+```
+
+# PLSDA Plot: Pre vs Post
+```{r}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#      install.packages("BiocManager")
+# BiocManager::install("mixOmics")
+ library(mixOmics)
+
+# Simulate X (metabolites) and Y (group labels)
+
+X <- metabolites_new[,5:1528]
+
+# identify zero variance col
+zero_var_cols <- which(apply(X, 2, function(col) sd(col, na.rm = TRUE) == 0))
+zero_var_names <- colnames(X)[zero_var_cols]
+
+# Remove variables with zero variance
+X <- X[, apply(X, 2, function(col) sd(col, na.rm = TRUE) != 0)]
+
+# VF vs CF
+Y <- factor(metabolites_new$Group)
+
+set.seed(123)
+plsda_result <- plsda(X, Y, ncomp = 2)  # 2 components
+plotIndiv(plsda_result,
+          comp = c(1, 2),
+          group = Y,
+          legend = TRUE,
+          ellipse = TRUE,
+          title = "PLS-DA Score Plot")
+
+# pre vs post
+Y <- factor(metabolites_new$Time, levels = c(1, 2), labels = c("pre", "post"))
+
+set.seed(123)
+plsda_result <- plsda(X, Y, ncomp = 2)  # 2 components
+plotIndiv(plsda_result,
+          comp = c(1, 2),
+          group = Y,
+          legend = TRUE,
+          ellipse = TRUE,
+          title = "PLS-DA Score Plot")
+
+```
+
+
+# OPLSDA plot
+```{r}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("ropls")
+library(ropls)
+
+# VF vs CF
+Y <- factor(metabolites_new$Group)
+set.seed(123)
+opls_model <- opls(X, Y, predI = 1, orthoI = NA)  # predI = 1 component, orthoI = auto-tuned
+
+# Extract scores
+scores <- getScoreMN(opls_model)
+scores_df <- as.data.frame(scores)
+scores_df$Group <- Y  # Add group info
+
+# Plot with ellipses
+ggplot(scores_df, aes(x = p1, y = o1, color = Group, fill = Group)) +
+  geom_point(size = 3) +
+  stat_ellipse(type = "norm", alpha = 0.3) +   # << Add this line
+  labs(title = "OPLS-DA Score Plot",
+       x = "Predictive Component (p1)",
+       y = "Orthogonal Component (o1)") +
+  theme_minimal()
+
+```
+
+
+
+# Step 1: Paired t-test and BH correction to clean the data 
+(to find metabolites that have significant difference before and after fire)
+
+**metabolites_sig** is gained from metabolites_diff, representing the difference values of metabolites that are significant in paired t test.
+**metabolites_sig_prepost** is gained from metabolites_clear, representing the pairs (post and pre values) of metabolites that are significant in paired t-test.
+**metabolites_new_sig** is gained from metabolites_new that has both paired and single sample. 
+*significant_CHEM* is the CHEM_ID of significant metabolites
+```{r}
+# Select only numeric columns for analysis
+numeric_cols <- names(metabolites_clear)[sapply(metabolites_clear, is.numeric)]
+numeric_cols <- setdiff(numeric_cols, "Time")  # Remove "Time" column: find all rows in numeric_cols that aren't in "Time"
+
+# Perform paired t-test for each variable in metabolites_clear
+t_test_results <- lapply(numeric_cols, function(var) {
+  t_test <- t.test(pre[[var]], post[[var]], paired = TRUE)
+  return(c(var, t_test$statistic, t_test$p.value))
+})
+
+# Convert list to dataframe
+t_test_df <- as.data.frame(do.call(rbind, t_test_results))
+colnames(t_test_df) <- c("CHEM_ID", "t_statistic", "p_value")
+
+# Convert numeric columns to proper format
+t_test_df$t_statistic <- as.numeric(t_test_df$t_statistic)
+t_test_df$p_value <- as.numeric(t_test_df$p_value)
+
+# Number of tests
+num_tests <- nrow(t_test_df)
+
+# BH-corrected p-value threshold (adjusted significance level)
+alpha <- 0.05
+BH_threshold <- alpha / num_tests
+
+# Apply BH correction
+t_test_df$adjusted_p_value <- p.adjust(t_test_df$p_value, method = "BH")
+t_test_df$significant <- t_test_df$adjusted_p_value < alpha
+
+# View final results with correction
+print(t_test_df)
+
+# filter the significant chemicals
+t_test_clear <- t_test_df %>%
+  filter(significant==TRUE)
+
+# get the CHEM_ID of significant Chemicals
+significant_CHEM <- t_test_clear$CHEM_ID
+```
+
+```{r}
+# clear the metabolites
+metabolites_sig <- metabolites_diff %>%
+  dplyr::select(`Sample ID`, all_of(significant_CHEM))
+
+# metabolites with pre and post
+metabolites_sig_prepost <- metabolites_clear %>%
+  dplyr::select(`Sample ID`, Time, Group, all_of(significant_CHEM))
+
+# all paired and single metabolites
+metabolites_new_sig <- metabolites_new %>%
+  dplyr::select(PARENT_SAMPLE_NAME, `Sample ID`, Time, Group, all_of(significant_CHEM))
+# write_xlsx(metabolites_sig, "metabolites_sig.xlsx")
+```
+
+
+# Step 2: Linear Mixed Model (find sig, same as paired t-test)
+## [old code] build linear mixed models
+to find if there is any difference varying by time (pre and post)
+```{r}
+# library(lme4)
+# 
+# metabolites_new$Time <- as.factor(metabolites_new$Time)
+# metabolites_new$`Sample ID` <- as.factor(metabolites_new$`Sample ID`)
+
+# Example for one metabolite (replace 'Metabolite_X' with actual column name)
+# model <- lmer(`209` ~ Time + (1 | `Sample ID`), data = metabolites_new)
+# summary(model)
+
+# results <- lapply(names(metabolites_new)[5:ncol(metabolites_new)], 
+#                   function(metabolite) {
+#                      formula_str <- paste0("`", metabolite, "` ~ Time + (1 | `Sample ID`)")
+#                       model <- lmer(as.formula(formula_str), data = metabolites_new)
+#                       summary(model)
+#                       })
+# # example
+# formula_str <- paste0("`", "212", "` ~ Time + (1 | `Sample ID`)")
+
+```
+
+
+## get the p-values etc. from the models
+```{r}
+# Load necessary libraries
+library(lme4)
+library(lmerTest)  # To obtain p-values and degrees of freedom
+library(broom.mixed)  # For confidence intervals
+library(openxlsx)  # To save results
+library(dplyr)
+
+metabolites_new$Time <- as.factor(metabolites_new$Time)
+metabolites_new$`Sample ID` <- as.factor(metabolites_new$`Sample ID`)
+
+# Function to fit LMM and extract statistics
+results_df <- lapply(names(metabolites_new)[5:ncol(metabolites_new)], function(metabolite) {
+  tryCatch({
+    # Construct formula
+    formula_str <- paste0("`", metabolite, "` ~ Time + (1 | `Sample ID`)")
+    
+    # Fit model using lmerTest::lmer() to get df
+    model <- lmerTest::lmer(as.formula(formula_str), data = metabolites_new)
+    
+    # Print if the model is singular
+    # print(isSingular(model))
+    
+    # Extract summary of fixed effects
+    summary_model <- summary(model)
+    
+    # Extract coefficient matrix and convert to data frame
+    fixed_effects <- as.data.frame(summary_model$coefficients)
+    
+    # Extract correct degrees of freedom (df) for Time effect
+    df_time <- fixed_effects["Time2", "df"]  # Correct indexing
+    
+    # Compute confidence intervals
+    ci <- confint(model, method = "Wald")
+    
+    # Ensure "Time2" effect exists
+    time_effect_row <- which(rownames(fixed_effects) == "Time2")
+    
+    if (length(time_effect_row) > 0) {
+      return(data.frame(
+        CHEM_ID = metabolite,
+        Estimate = fixed_effects["Time2", "Estimate"],
+        Std_Error = fixed_effects["Time2", "Std. Error"],
+        t_value = fixed_effects["Time2", "t value"],
+        df = df_time,  # Correctly extracted degrees of freedom
+        p_value = fixed_effects["Time2", "Pr(>|t|)"],  # Directly extract p-value
+        CI_Lower = ci[time_effect_row + 1, 1],  # Lower 95% CI
+        CI_Upper = ci[time_effect_row + 1, 2]   # Upper 95% CI
+      ))
+    } else {
+      return(NULL)  # Return NULL if "Time2" effect is missing
+    }
+  }, error = function(e) {
+    return(NULL)  # Ignore errors and continue
+  })
+})
+
+# Combine results into a single data frame
+results_df <- do.call(rbind, results_df)
+
+# Mark the significance level
+results_df <- results_df %>%
+  mutate(
+    significance_original_p = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  )
+
+# write_xlsx(results_df, "LMM_results.xlsx")
+```
+
+
+## do multiple comparison correction for LMM
+alpha = 0.05 means that you expect 5 false positives just by chance.
+Multiple testing correction controls for this inflation to ensure that your significant results are truly meaningful.
+*results_sig* stores the significant metabolites with LMM.
+
+```{r}
+# Apply Bonferroni Correction
+# results_df$bonferroni_p <- p.adjust(results_df$p_value, method = "bonferroni")
+
+# Apply Benjamini-Hochberg (BH) Correction (FDR)
+results_df$bh_p <- p.adjust(results_df$p_value, method = "BH")
+
+# get the significance
+results_df <- results_df %>%
+  mutate(
+    CHEM_ID = as.numeric(CHEM_ID),
+    significance_bh_p = case_when(
+      bh_p < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  ) %>%
+  left_join(chem_annotate %>% dplyr::select(CHEM_ID, PLOT_NAME), by = "CHEM_ID")
+
+
+# write.xlsx(results_df, file = "LMM_results.xlsx", rowNames = FALSE)
+
+# filter out non-significant rows
+results_sig <- na.omit(results_df)
+
+```
+
+# Step 3: overlapped CHEM_ID with results_sig (LMM) and metabolites_sig (t-test): 
+**common_CHEM_ID**
+
+**metabo_diff_common** get the overlapped metabolites from metabolites_diff (only difference of pairs)
+**metabodiff_demo** metabo_diff_common + demo: overlapped metabolites with demographic information
+```{r}
+CHEM_ID_t_test <- colnames(metabolites_sig)[-1]
+CHEM_ID_LMM <- results_sig$CHEM_ID
+
+# Find common elements
+common_CHEM_ID <- intersect(CHEM_ID_t_test, CHEM_ID_LMM)
+
+common_CHEM_ID
+
+metabo_diff_common <- metabolites_diff %>%
+  dplyr::select(1, all_of(common_CHEM_ID)) %>%
+  mutate(`Sample ID` = gsub("FFP01", "", `Sample ID`)) %>%
+  mutate(`Sample ID`= as.numeric(`Sample ID`))
+
+metabodiff_demo <- metabo_diff_common %>%
+  left_join(demo_all, metabo_diff_common, by = "Sample ID")
+
+```
+
+## Chemical Annotation sheet
+```{r}
+chem_annotate <- read_excel("for_code_UNTX-07-23PHML+ DATA TABLES.xlsx", sheet = "Chemical Annotation")
+
+filtered_data <- chem_annotate %>% filter(CHEM_ID %in% common_CHEM_ID)
+t_test_metabo <- chem_annotate %>% filter(CHEM_ID %in% CHEM_ID_t_test)
+LMM_metabo <- chem_annotate %>% filter(CHEM_ID %in% CHEM_ID_LMM)
+
+# write.xlsx(filtered_data, "22_sig_metabo_annotation.xlsx")
+# write.xlsx(t_test_metabo, "t_test_metabo_annotation.xlsx")
+# write.xlsx(LMM_metabo, "LMM_metabo_annotation.xlsx")
+
+
+```
+
+# Volcano plots
+```{r}
+# 1. Prepare your data
+fc_pos  <- log2(1.5)    # ≈ 0.585
+fc_neg  <- -log2(1.5)   # ≈ −0.585
+
+volcano_df <- results_df %>%
+  mutate(
+    logFC     = Estimate,
+    negLog10P = -log10(bh_p),
+    status = case_when(
+      bh_p < 0.05 & logFC >= fc_pos  ~ "Up (>|1.5|)",
+      bh_p < 0.05 & logFC <= fc_neg  ~ "Down (>|1.5|)",
+      TRUE                           ~ "NS"
+    )
+  ) 
+
+
+# 2. Plot
+ggplot(volcano_df, aes(x = logFC, y = negLog10P, color = status)) +
+  geom_point(alpha = 0.7, size = 2) +
+  # horizontal line at adj-p = 0.05
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey50") +
+  # vertical lines at ±log2(1.5)
+  geom_vline(xintercept = c(fc_neg, fc_pos), linetype = "dashed", color = "grey50") +
+  scale_color_manual(
+    values = c(
+      "Up (>|1.5|)"   = "red",
+      "Down (>|1.5|)" = "blue",
+      "NS"            = "grey30"
+    )
+  ) +
+  labs(
+    x     = expression(log[2]~Fold~Change~"(Estimate)"),
+    y     = expression(-log[10]~"(BH‐adjusted p)"),
+    color = NULL,
+    title = "Volcano Plot of LMM Results\n(FC > 1.5 & BH p < 0.05)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "right") +
+  # 3. label only the hit points
+  geom_text_repel(
+    data = subset(volcano_df, status != "NS"),
+    aes(label = PLOT_NAME),
+    size        = 3,
+    max.overlaps = 20
+  )
+```
+
+
+
+# Spagetti Plot
+
+### all 98 significant metabolites
+```{r}
+
+# Step 1: Reshape to long format
+met_long <- metabolites_sig_prepost %>%
+  pivot_longer(cols = 4:ncol(.), names_to = "ChemID", values_to = "Value")
+
+# Step 2: Prepare plot data with original Time and Group info
+plot_data_long <- met_long %>%
+  rename(SampleID = `Sample ID`) %>%
+  mutate(Time = ifelse(Time == 1, "Pre", "Post"),
+         Time = factor(Time, levels = c("Pre", "Post")))
+
+# Step 3: Compute group-level and overall means (still using raw values)
+mean_lines <- plot_data_long %>%
+  group_by(Time, Group) %>%
+  summarise(mean_value = mean(Value, na.rm = TRUE), .groups = "drop")
+
+overall_mean <- plot_data_long %>%
+  group_by(Time) %>%
+  summarise(mean_value = mean(Value, na.rm = TRUE))
+
+# Step 4: Plot
+ggplot(plot_data_long, aes(x = Time, y = Value, group = interaction(SampleID, ChemID))) +
+  geom_line(color = "gray", alpha = 0.4) +
+  geom_line(data = overall_mean, aes(y = mean_value, group = 1),
+            color = "black", size = 1.2) +
+  geom_line(data = mean_lines %>% filter(Group == "CF"),
+            aes(y = mean_value, group = Group),
+            color = "red", linetype = "dashed", size = 1) +
+  geom_line(data = mean_lines %>% filter(Group == "VF"),
+            aes(y = mean_value, group = Group),
+            color = "blue", linetype = "dashed", size = 1) +
+  labs(x = "Time", y = "Metabolite Value", title = "Metabolite Levels: Pre vs. Post by Group") +
+  theme_minimal()
+
+```
+
+### VF and CF separately
+```{r}
+
+library(tidyverse)
+
+# Step 1: Reshape to long format
+met_long <- metabolites_sig_prepost %>%
+  pivot_longer(cols = 4:ncol(.), names_to = "ChemID", values_to = "Value")
+
+# Step 2: Prepare full plot data
+plot_data_long <- met_long %>%
+  rename(SampleID = `Sample ID`) %>%
+  mutate(Time = ifelse(Time == 1, "Pre", "Post"),
+         Time = factor(Time, levels = c("Pre", "Post")))
+
+# Now split into two groups
+cf_data <- plot_data_long %>% filter(Group == "CF")
+vf_data <- plot_data_long %>% filter(Group == "VF")
+
+# Step 3a: CF Plot
+cf_mean <- cf_data %>%
+  group_by(Time) %>%
+  summarise(mean_value = mean(Value, na.rm = TRUE))
+
+ggplot(cf_data, aes(x = Time, y = Value, group = interaction(SampleID, ChemID))) +
+  geom_line(color = "gray", alpha = 0.4) +
+  geom_line(data = cf_mean, aes(y = mean_value, group = 1),
+            color = "red", linewidth = 1.2) +
+  labs(x = "Time", y = "Metabolite Value", title = "CF Group: Pre vs. Post Metabolite Levels") +
+  theme_minimal()
+
+# Step 3b: VF Plot
+vf_mean <- vf_data %>%
+  group_by(Time) %>%
+  summarise(mean_value = mean(Value, na.rm = TRUE))
+
+ggplot(vf_data, aes(x = Time, y = Value, group = interaction(SampleID, ChemID))) +
+  geom_line(color = "gray", alpha = 0.4) +
+  geom_line(data = vf_mean, aes(y = mean_value, group = 1),
+            color = "blue", linewidth = 1.2) +
+  labs(x = "Time", y = "Metabolite Value", title = "VF Group: Pre vs. Post Metabolite Levels") +
+  theme_minimal()
+
+```
+
+### mean values for 98 significant metabolites
+```{r}
+library(tidyverse)
+
+# Step 1: reshape to long
+met_long <- metabolites_sig_prepost %>%
+  pivot_longer(cols = 4:ncol(.),
+               names_to  = "ChemID",
+               values_to = "Value")
+
+# Step 2: add nice Time labels
+plot_data_long <- met_long %>%
+  rename(SampleID = `Sample ID`) %>%
+  mutate(Time = factor(ifelse(Time == 1, "Pre", "Post"),
+                       levels = c("Pre","Post")))
+
+# Step 3: compute per‐metabolite means at Pre and Post
+metabolite_means <- plot_data_long %>%
+  group_by(ChemID, Time) %>%
+  summarise(mean_value = mean(Value, na.rm = TRUE),
+            .groups = "drop")
+
+# Step 4: compute group‐level and overall means
+group_means <- plot_data_long %>%
+  group_by(Time, Group) %>%
+  summarise(mean_value = mean(Value, na.rm = TRUE),
+            .groups = "drop")
+
+overall_means <- plot_data_long %>%
+  group_by(Time) %>%
+  summarise(mean_value = mean(Value, na.rm = TRUE),
+            .groups = "drop")
+
+# Step 5: draw the spaghetti plot
+ggplot() +
+  # 98 grey lines (one per metabolite)
+  geom_line(data = metabolite_means,
+            aes(x = Time, y = mean_value, group = ChemID),
+            color = "gray", alpha = 0.6) +
+  # overall mean
+  geom_line(data = overall_means,
+            aes(x = Time, y = mean_value, group = 1),
+            color = "black", size = 1.2) +
+  # CF mean
+  geom_line(data = filter(group_means, Group == "CF"),
+            aes(x = Time, y = mean_value, group = Group),
+            color = "red", linetype = "dashed", size = 1) +
+  # VF mean
+  geom_line(data = filter(group_means, Group == "VF"),
+            aes(x = Time, y = mean_value, group = Group),
+            color = "blue", linetype = "dashed", size = 1) +
+  labs(
+    x     = "Time",
+    y     = "Mean metabolite value",
+    title = "Each metabolite’s Pre→Post change, with group & overall means"
+  ) +
+  theme_minimal()
+
+```
+
+
+
+## Venn Diagram
+```{r}
+library(VennDiagram)
+# Example data
+set_t_test <- CHEM_ID_t_test
+set_LMM <- CHEM_ID_LMM
+
+# Generate Venn diagram
+venn.plot <- venn.diagram(
+  x = list(Set1 = set_t_test, Set2 = set_LMM),
+  category.names = c("set_t_test", "set_LMM"),
+  filename = NULL,
+  fill = c("red", "blue") # Colors for each set
+)
+
+# Display the Venn diagram
+grid.draw(venn.plot)
+```
+
+
+# Step 4: correlation coefficient table
+in metabodiff_demo, all firefighters are white, only 2 of them are volunteers, none of them smoking, only one female.
+Figure out which covariates are significantly correlated to the metabolites.
+**metaodiff_demo_clear** is cleared metabodiff_demo w/o race, CF/VF, smoke, female; and have one data imputed in "Years served as a firefighter"
+only "Fire-related activities (times/month)" has two non-significant p-values
+```{r}
+metabodiff_demo_select <- metabodiff_demo %>% 
+  dplyr::select(all_of(c("Sample ID",common_CHEM_ID, demo_columns_select)))
+
+# Generate the correlation coefficient table
+correlation_table <- metabodiff_demo_select %>%
+  cor(method = "spearman") %>%
+  .[common_CHEM_ID, demo_columns_select]
+
+# t-test and p-values
+get_p_values <- function(df, common_CHEM_ID, demo_columns_select) {
+  p_values <- matrix(NA, nrow = length(common_CHEM_ID), ncol = length(demo_columns_select))
+  rownames(p_values) <- common_CHEM_ID
+  colnames(p_values) <- demo_columns_select
+  
+  for (chem_id in common_CHEM_ID) {
+    for (demo_col in demo_columns_select) {
+      group1 <- metabodiff_demo_select[[chem_id]]
+      group2 <- metabodiff_demo_select[[demo_col]]
+      t_test_result <- t.test(group1, group2)
+      p_values[chem_id, demo_col] <- t_test_result$p.value
+    }
+  }
+  return(as.data.frame(p_values))
+}
+
+# Get p-values for the correlation table
+p_values_table <- get_p_values(metabodiff_demo_select, common_CHEM_ID, demo_columns_select)
+
+# write.xlsx(p_values_table, file = "corr_p_values_table.xlsx", rowNames = FALSE)
+```
+
+
+# Step 5: 2nd model: LMMs with all covariates: 
+Based on the result we got from the above, we have metabolites that have significant difference, common_CHEM_ID, then extract the common_CHEM_ID from the metabolites_new.
+```{r}
+
+# combine the demo to metabolites_new (pairs and single)
+metabolites_new_common <- metabolites_new %>%
+  dplyr::select(1:4, all_of(common_CHEM_ID)) %>%
+  mutate(`Sample ID` = gsub("^([0-9]{1,2}).*", "\\1", `Sample ID`)) %>%
+  mutate(`Sample ID` = as.numeric(`Sample ID`))
+
+metabonew_demo <- metabolites_new_common %>%
+  left_join(demo_all, metabolites_new_common, by = "Sample ID")
+
+# just remove the first PARENT_SAMPLE_NAME column
+metabonew_demo_clear <- metabonew_demo[,-1]
+
+# Function to fit LMM and extract statistics
+results_df_2 <- lapply(common_CHEM_ID, function(metabolite) {
+  tryCatch({
+    # Construct formula with additional covariates
+    formula_str <- paste0("`", metabolite, "` ~ Time + Age + Female + Race + BMI + `Firefighter type` + `Years served as a firefighter` + `Non-fire-related activities (times/week)` + `Fire-related activities (times/month)` + `Current smoker` + `Former smoker` + (1 | `Sample ID`)")
+    
+    # Fit model using lmerTest::lmer() to get df
+    model <- lmerTest::lmer(as.formula(formula_str), data = metabonew_demo_clear)
+    
+    # Extract summary of fixed effects
+    summary_model <- summary(model)
+    
+    # Extract coefficient matrix and convert to data frame
+    fixed_effects <- as.data.frame(summary_model$coefficients)
+    
+    # Compute confidence intervals
+    ci <- confint(model, method = "Wald")
+    
+    # Extract statistics for each covariate
+    covariates <- rownames(fixed_effects)[-1]
+    results_list <- lapply(covariates, function(covariate) {
+      if (covariate %in% rownames(fixed_effects)) {
+        return(data.frame(
+          CHEM_ID = metabolite,
+          Covariate = covariate,
+          Estimate = fixed_effects[covariate, "Estimate"],
+          Std_Error = fixed_effects[covariate, "Std. Error"],
+          t_value = fixed_effects[covariate, "t value"],
+          df = fixed_effects[covariate, "df"],
+          p_value = fixed_effects[covariate, "Pr(>|t|)"],
+          CI_Lower = ci[covariate, 1],
+          CI_Upper = ci[covariate, 2]
+        ))
+      } else {
+        return(NULL)
+      }
+    })
+    
+    # Combine results for all covariates
+    do.call(rbind, results_list)
+  }, error = function(e) {
+    return(NULL)  # Ignore errors and continue
+  })
+})
+
+# Combine results into a single data frame
+results_df_2 <- do.call(rbind, results_df_2)
+
+# Mark the significance level
+results_df_2 <- results_df_2 %>%
+  mutate(
+    significance_original_p = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  )
+
+# filter out non-significant rows
+results_sig_2 <- na.omit(results_df_2)
+```
+## 2nd model: LMMs with selected covariates: 
+
+```{r}
+# Function to fit LMM and extract statistics
+results_df_3 <- lapply(common_CHEM_ID, function(metabolite) {
+  tryCatch({
+    # Construct formula with additional covariates
+    formula_str <- paste0("`", metabolite, "` ~ Time + Age + BMI + `Years served as a firefighter` + `Non-fire-related activities (times/week)` + `Fire-related activities (times/month)` + (1 | `Sample ID`)")
+    
+    # Fit model using lmerTest::lmer() to get df
+    model <- lmerTest::lmer(as.formula(formula_str), data = metabonew_demo_clear)
+    
+    # Extract summary of fixed effects
+    summary_model <- summary(model)
+    
+    # Extract coefficient matrix and convert to data frame
+    fixed_effects <- as.data.frame(summary_model$coefficients)
+    
+    # Compute confidence intervals
+    ci <- confint(model, method = "Wald")
+    
+    # Extract statistics for each covariate
+    covariates <- rownames(fixed_effects)[-1]
+    results_list <- lapply(covariates, function(covariate) {
+      if (covariate %in% rownames(fixed_effects)) {
+        return(data.frame(
+          CHEM_ID = metabolite,
+          Covariate = covariate,
+          Estimate = fixed_effects[covariate, "Estimate"],
+          Std_Error = fixed_effects[covariate, "Std. Error"],
+          t_value = fixed_effects[covariate, "t value"],
+          df = fixed_effects[covariate, "df"],
+          p_value = fixed_effects[covariate, "Pr(>|t|)"],
+          CI_Lower = ci[covariate, 1],
+          CI_Upper = ci[covariate, 2]
+        ))
+      } else {
+        return(NULL)
+      }
+    })
+    
+    # Combine results for all covariates
+    do.call(rbind, results_list)
+  }, error = function(e) {
+    return(NULL)  # Ignore errors and continue
+  })
+})
+
+# Combine results into a single data frame
+results_df_3 <- do.call(rbind, results_df_3)
+
+# Mark the significance level
+results_df_3 <- results_df_3 %>%
+  mutate(
+    significance_original_p = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  )
+
+# filter out non-significant rows
+results_sig_3 <- na.omit(results_df_3)
+
+```
+
+# Pathway Analysis: extract the overlapped CHEM_IDs from Chemical Annotation sheet
+
+```{r}
+pa_results <- read_excel("PA_Results_0507.xlsx")
+PA_metabo_names <- c("L-Glutamate", "L-Arginine", "L-Aspartate", "2-Oxoglutarate", "Fumarate", "L-Aspartic acid", "Oxoglutaric acid", "D-Glutamic acid", "L-Malic acid", "Pyruvic acid", "Carnosine", "Uracil", "Pyruvate", "Cys-Gly", "5-Oxoproline", "Spermidine", "Spermine", "(S)-Malate", "(S)-Lactate", "Sphingosine 1-phosphate", "Sphinganine 1-phosphate", "Sphinganine", "Sphingosine")
+LMM_metabo_names <- LMM_metabo$CHEMICAL_NAME
+common_PA_LMM <- intersect(PA_metabo_names, LMM_metabo_names)
+```
+
+
+
